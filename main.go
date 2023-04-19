@@ -39,6 +39,12 @@ type ClientInfo struct {
 	Y        int    `json:"y"`
 }
 
+type addCellRequest struct {
+	X    int      `json:"x"`
+	Y    int      `json:"y"`
+	Type CellType `json:"type"`
+}
+
 type CellType string
 
 const jwtSecret = "your_jwt_secret"
@@ -73,6 +79,12 @@ type CellInfo struct {
 	Clients []ClientInfo `json:"clients"`
 }
 
+type deleteCellRequest struct {
+	X int `json:"x"`
+	Y int `json:"y"`
+}
+
+
 type sessionPayload struct {
 	ServerName string `json:"server_name"`
 	Username   string `json:"username"`
@@ -95,6 +107,12 @@ type sendMessagePayload struct {
 	Message      string `json:"message"`
 }
 
+type kickUsersInCellRequest struct {
+	X int `json:"x"`
+	Y int `json:"y"`
+}
+
+
 type moveUserPayload struct {
 	Username string `json:"username"`
 	X        int    `json:"x"`
@@ -108,7 +126,7 @@ var grid [][]*Cell
 var gridHeight = 25
 var gridWidth = 25
 const rpgAuthPassword = "your_predefined_password"
-
+var gridMutex sync.RWMutex
 
 func decodeSessionToken(token string) (string, string, error) {
 	decoded, err := base64.StdEncoding.DecodeString(token)
@@ -969,9 +987,13 @@ func startAPI() {
 	http.HandleFunc("/api/sendMessageToUser", sendMessageToUserHandler)
 	http.HandleFunc("/api/moveUser", moveUserHandler)
 	http.HandleFunc("/api/sendMessageToCell", sendMessageToCellHandler)
-	http.HandleFunc("/muteUser", muteUserHandler)
-	http.HandleFunc("/saveMap", saveMapHandler)
-	http.HandleFunc("/loadMap", loadMapHandler)
+	http.HandleFunc("/api/muteUser", muteUserHandler)
+	http.HandleFunc("/api/saveMap", saveMapHandler)
+	http.HandleFunc("/api/loadMap", loadMapHandler)
+	http.HandleFunc("/api/addCell", addCellHandler)
+	http.HandleFunc("/api/deleteCell", deleteCellHandler)
+	http.HandleFunc("/api/kickUsersInCell", kickUsersInCellHandler)
+
 
 	fmt.Println("Starting API server on :3000")
 	http.ListenAndServe(":3000", nil)
@@ -1298,15 +1320,46 @@ func loadMapHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	err := loadMap("map.json")
+	newGrid, err := loadMap("map.json")
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
 		w.Write([]byte(fmt.Sprintf("Error loading map: %v", err)))
 		return
 	}
 
+	gridMutex.Lock()
+	grid = newGrid
+	gridMutex.Unlock()
+
 	clients.Range(func(_, v interface{}) bool {
 		client := v.(*client)
+
+		// Check if the new cell is empty
+		if grid[client.x][client.y].Type != Empty {
+			// If not, find an adjacent empty cell
+			adjacentEmpty := false
+			for dx := -1; dx <= 1; dx++ {
+				for dy := -1; dy <= 1; dy++ {
+					newX, newY := client.x+dx, client.y+dy
+
+					if newX >= 0 && newX < len(grid) && newY >= 0 && newY < len(grid[0]) && grid[newX][newY].Type == Empty {
+						client.x, client.y = newX, newY
+						adjacentEmpty = true
+						break
+					}
+				}
+				if adjacentEmpty {
+					break
+				}
+			}
+			// If no adjacent empty cell is found, notify the client
+			if !adjacentEmpty {
+				client.conn.Write([]byte("Your position could not be updated due to an obstacle. Please reconnect.\n"))
+				client.conn.Close()
+				return true
+			}
+		}
+
 		announceMap(client)
 		return true
 	})
@@ -1315,4 +1368,141 @@ func loadMapHandler(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte("Map loaded and announced to clients"))
 }
 
+func addCellHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Header.Get("RPG_AUTH") != rpgAuthPassword {
+		w.WriteHeader(http.StatusUnauthorized)
+		return
+	}
+
+	var req addCellRequest
+	err := json.NewDecoder(r.Body).Decode(&req)
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte("Invalid request payload"))
+		return
+	}
+
+	gridMutex.Lock()
+	defer gridMutex.Unlock()
+
+	// Check if the cell already exists
+	if req.X >= 0 && req.X < len(grid) && req.Y >= 0 && req.Y < len(grid[req.X]) {
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte("Cell already exists"))
+		return
+	}
+
+	// Extend the grid to accommodate the new cell
+	if req.X >= len(grid) {
+		for i := len(grid); i <= req.X; i++ {
+			grid = append(grid, []*Cell{})
+		}
+	}
+
+	for i := range grid {
+		for j := len(grid[i]); j <= req.Y; j++ {
+			grid[i] = append(grid[i], &Cell{
+				Type:    Empty,
+				Clients: sync.Map{},
+			})
+		}
+	}
+
+	// Add the new cell
+	grid[req.X][req.Y] = &Cell{
+		Type:    req.Type,
+		Clients: sync.Map{},
+	}
+
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte("Cell added successfully"))
+}
+
+func findEmptyAdjacentCell(x, y int) (int, int) {
+	directions := [][2]int{{0, 1}, {1, 0}, {0, -1}, {-1, 0}}
+	for _, d := range directions {
+		newX := x + d[0]
+		newY := y + d[1]
+		if newX >= 0 && newX < len(grid) && newY >= 0 && newY < len(grid[newX]) && grid[newX][newY].Type == Empty {
+			return newX, newY
+		}
+	}
+	return -1, -1
+}
+
+func deleteCellHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Header.Get("RPG_AUTH") != rpgAuthPassword {
+		w.WriteHeader(http.StatusUnauthorized)
+		return
+	}
+
+	var req deleteCellRequest
+	err := json.NewDecoder(r.Body).Decode(&req)
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte("Invalid request payload"))
+		return
+	}
+
+	gridMutex.Lock()
+	defer gridMutex.Unlock()
+
+	if req.X < 0 || req.X >= len(grid) || req.Y < 0 || req.Y >= len(grid[req.X]) {
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte("Cell does not exist"))
+		return
+	}
+
+	cell := grid[req.X][req.Y]
+	cell.Clients.Range(func(_, v interface{}) bool {
+		client := v.(*client)
+		newX, newY := findEmptyAdjacentCell(req.X, req.Y)
+		if newX != -1 && newY != -1 {
+			moveClient(client, newX, newY)
+		} else {
+			// If no empty adjacent cell is found, disconnect the client
+			client.conn.Close()
+		}
+		return true
+	})
+
+	grid[req.X] = append(grid[req.X][:req.Y], grid[req.X][req.Y+1:]...)
+
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte("Cell deleted successfully"))
+}
+
+func kickUsersInCellHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Header.Get("RPG_AUTH") != rpgAuthPassword {
+		w.WriteHeader(http.StatusUnauthorized)
+		return
+	}
+
+	var req kickUsersInCellRequest
+	err := json.NewDecoder(r.Body).Decode(&req)
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte("Invalid request payload"))
+		return
+	}
+
+	gridMutex.Lock()
+	defer gridMutex.Unlock()
+
+	if req.X < 0 || req.X >= len(grid) || req.Y < 0 || req.Y >= len(grid[req.X]) {
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte("Cell does not exist"))
+		return
+	}
+
+	cell := grid[req.X][req.Y]
+	cell.Clients.Range(func(_, v interface{}) bool {
+		client := v.(*client)
+		client.conn.Close()
+		return true
+	})
+
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte("All users in the cell have been kicked"))
+}
 
