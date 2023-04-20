@@ -46,6 +46,8 @@ RUN set -x && apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -
 # Copy the binary to the production image from the builder stage.
 COPY --from=builder /app/server /app/server
 
+RUN ulimit -n 2048
+
 EXPOSE 3000
 EXPOSE 6000
 

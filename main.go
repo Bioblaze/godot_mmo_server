@@ -8,18 +8,38 @@ import (
 	"errors"
 	"fmt"
 	"io/ioutil"
+	"log"
 	"net"
 	"net/http"
 	"os"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
-	"github.com/dgrijalva/jwt-go"
+	//"github.com/dgrijalva/jwt-go"
 	"github.com/golang-jwt/jwt"
 )
+
+const (
+	Empty CellType = "Empty"
+	Mountain CellType = "Mountain"
+	Grass CellType = "Grass"
+	Water CellType = "Water"
+)
+var clients sync.Map
+var channels sync.Map
+const jwtSecret = "your_jwt_secret"
+var loadedUsers = make(map[string]LoadUserRequest)
+var defaultSleepDelay = 3 * time.Second
+const mapFilename = "map.json"
+var grid [][]*Cell
+var gridHeight = 25
+var gridWidth = 25
+const rpgAuthPassword = "your_predefined_password"
+var gridMutex sync.RWMutex
+var serverName = "TestServer1"
 
 type client struct {
 	conn     net.Conn
@@ -47,8 +67,6 @@ type addCellRequest struct {
 
 type CellType string
 
-const jwtSecret = "your_jwt_secret"
-
 type travelClaims struct {
 	jwt.StandardClaims
 	ServerName string `json:"server_name"`
@@ -61,13 +79,6 @@ type rateLimiter struct {
 	tokenFillRate    time.Duration
 	lastCheck        time.Time
 }
-
-const (
-	Empty CellType = iota
-	Mountain
-	Grass
-	Water
-)
 
 type Cell struct {
 	Type    CellType
@@ -112,52 +123,10 @@ type kickUsersInCellRequest struct {
 	Y int `json:"y"`
 }
 
-
 type moveUserPayload struct {
 	Username string `json:"username"`
 	X        int    `json:"x"`
 	Y        int    `json:"y"`
-}
-
-var loadedUsers = make(map[string]LoadUserRequest)
-var defaultSleepDelay = 3 * time.Second
-const mapFilename = "map.json"
-var grid [][]*Cell
-var gridHeight = 25
-var gridWidth = 25
-const rpgAuthPassword = "your_predefined_password"
-var gridMutex sync.RWMutex
-
-func decodeSessionToken(token string) (string, string, error) {
-	decoded, err := base64.StdEncoding.DecodeString(token)
-	if err != nil {
-		return "", "", err
-	}
-
-	var payload sessionPayload
-	err = json.Unmarshal(decoded, &payload)
-	if err != nil {
-		return "", "", err
-	}
-
-	if payload.ServerName == "" || payload.Username == "" {
-		return "", "", errors.New("invalid session payload")
-	}
-
-	return payload.ServerName, payload.Username, nil
-}
-
-func initGrid() {
-	grid = make([][]*Cell, gridHeight)
-	for i := range grid {
-		grid[i] = make([]*Cell, gridWidth)
-		for j := range grid[i] {
-			grid[i][j] = &Cell{
-				Type:    Empty, // Assign the default type for now
-				Clients: sync.Map{},
-			}
-		}
-	}
 }
 
 type channel struct {
@@ -166,14 +135,23 @@ type channel struct {
 	clients sync.Map
 }
 
-var clients sync.Map
-var channels sync.Map
+type cellInfo struct {
+	X, Y int
+}
 
-func main() {
-	go startAPI()
+type priorityQueueItem struct {
+	value    cellInfo
+	priority int
+	index    int
+}
+
+type priorityQueue []*priorityQueueItem
+
+func init() {
 	// Check if the map file exists
 	if _, err := os.Stat(mapFilename); os.IsNotExist(err) {
 		// If the file does not exist, generate a new map
+		fmt.Println("Creating a empty Map, since no map was found..")
 		initGrid()
 	} else {
 		// If the file exists, load the map from the file
@@ -184,17 +162,39 @@ func main() {
 		}
 		grid = loadedGrid
 	}
-	// Set the maximum number of open files allowed by the system
-	err := setMaxOpenFiles(2048)
-	if err != nil {
-		fmt.Printf("Error setting max open files limit: %v\n", err)
-		return
-	}
+}
 
+func main() {
+	go startAPI()
+
+	os := runtime.GOOS
+    switch os {
+    case "windows":
+        fmt.Println("Windows not setting max open files limit.")
+    default:
+		// Set the maximum number of open files allowed by the system
+		/*
+		err := setMaxOpenFiles(2048)
+		if err != nil {
+			fmt.Printf("Error setting max open files limit: %v\n", err)
+			return
+		}
+		*/
+    }
+
+	
+	err := startServer()
+	if err != nil {
+		log.Fatalf("Failed to start server: %v", err)
+	}
+}
+
+func startServer() error {
 	ln, err := net.Listen("tcp", ":6000")
 	if err != nil {
-		panic(err)
+		return fmt.Errorf("failed to listen: %v", err)
 	}
+	fmt.Println("Startup Complete~")
 	defer ln.Close()
 
 	for {
@@ -208,6 +208,7 @@ func main() {
 	}
 }
 
+/*
 func setMaxOpenFiles(limit uint64) error {
 	var rLimit syscall.Rlimit
 	err := syscall.Getrlimit(syscall.RLIMIT_NOFILE, &rLimit)
@@ -215,7 +216,7 @@ func setMaxOpenFiles(limit uint64) error {
 		return err
 	}
 
-	rLimit.Cur = limit
+	rLimit.Cur = rLimit.Max
 	err = syscall.Setrlimit(syscall.RLIMIT_NOFILE, &rLimit)
 	if err != nil {
 		return err
@@ -223,7 +224,7 @@ func setMaxOpenFiles(limit uint64) error {
 
 	return nil
 }
-
+*/
 
 func handleConnection(conn net.Conn) {
 	defer conn.Close()
@@ -259,9 +260,11 @@ func handleConnection(conn net.Conn) {
 		addToGridDirectly(cli, loadedUser.X, loadedUser.Y);
 		delete(loadedUsers, username)
 	} else {
+		fmt.Println("Not a Loaded User, adding directly to Grid")
 		addToGridDirectly(cli, 0, 0);
 	}
 	//grid[0][0].Store(cli.username, cli) // Place the client at position (0, 0) by default
+		fmt.Println("Announcing the Map to the Client")
 	announceMap(cli)
 
 	if serverName != "" {
@@ -302,8 +305,6 @@ func announce(cli *client, action string) {
 	})
 }
 
-
-
 func echo(cli *client, msg string) {
 	if cli.muted {
 		cli.conn.Write([]byte("You are muted and cannot send messages.\n"))
@@ -327,7 +328,6 @@ func broadcast(cli *client) {
 		return true
 	})
 }
-
 
 func handleCommand(cli *client, msg string) {
 	if !cli.commandRateLimiter.isAllowed() {
@@ -397,7 +397,7 @@ func handleCommand(cli *client, msg string) {
 	case "west":
 		moveClient(cli, -1, 0)
 	case "travel":
-		jwt, err := generateJWT("current_server_name", cli.username)
+		jwt, err := generateJWT(serverName, cli.username)
 		if err != nil {
 			cli.conn.Write([]byte("Error generating travel token.\n"))
 			return
@@ -431,6 +431,7 @@ func handleCommand(cli *client, msg string) {
 		cli.conn.Write([]byte(response))
 	}
 }
+
 func listUsers(cli *client) {
 	cli.conn.Write([]byte("Connected users:\n"))
 
@@ -478,8 +479,6 @@ func unmuteUserGlobal(cli *client, targetUsername string) {
 	response := fmt.Sprintf("You have unmuted '%s'.\n", targetUsername)
 	cli.conn.Write([]byte(response))
 }
-
-
 
 func createChannel(cli *client, channelName string) {
 	_, ok := channels.Load(channelName)
@@ -571,10 +570,12 @@ func moveClient(cli *client, dx, dy int) {
 		addToGrid(cli)
 		response := struct {
 			Action string `json:"action"`
+			Username string `json:"username"`
 			X      int    `json:"x"`
 			Y      int    `json:"y"`
 		}{
 			Action: "move",
+			Username: cli.username,
 			X:      newX,
 			Y:      newY,
 		}
@@ -611,6 +612,20 @@ func addToGrid(cli *client) {
 }
 
 func addToGridDirectly(cli *client, x int, y int) {
+	fmt.Printf("Adding to Grid X(%d) Y(%d)\n", x, y)
+
+	// Check if y is within the grid bounds
+	if y < 0 || y >= len(grid) {
+		fmt.Printf("Error: Y coordinate (%d) is out of range\n", y)
+		return
+	}
+
+	// Check if x is within the grid bounds
+	if x < 0 || x >= len(grid[y]) {
+		fmt.Printf("Error: X coordinate (%d) is out of range\n", x)
+		return
+	}
+
 	cell := grid[y][x]
 	cell.Clients.Store(cli.username, cli)
 }
@@ -714,18 +729,6 @@ func broadcastLocation(cli *client) {
 	})
 }
 
-type cellInfo struct {
-	X, Y int
-}
-
-type priorityQueueItem struct {
-	value    cellInfo
-	priority int
-	index    int
-}
-
-type priorityQueue []*priorityQueueItem
-
 func (pq priorityQueue) Len() int { return len(pq) }
 
 func (pq priorityQueue) Less(i, j int) bool {
@@ -810,15 +813,12 @@ func aStarPathfinding(start, target cellInfo, grid *[][]*Cell) []cellInfo {
 	return []cellInfo{}
 }
 
-
 func abs(x int) int {
 	if x < 0 {
 		return -x
 	}
 	return x
 }
-
-
 
 func whisper(cli *client, targetUsername, message string) {
 	targetClient, ok := clients.Load(targetUsername)
@@ -841,6 +841,38 @@ func whisper(cli *client, targetUsername, message string) {
 
 	targetClient.(*client).conn.Write(jsonData)
 	cli.conn.Write([]byte("Message sent.\n"))
+}
+
+func decodeSessionToken(token string) (string, string, error) {
+	decoded, err := base64.StdEncoding.DecodeString(token)
+	if err != nil {
+		return "", "", err
+	}
+
+	var payload sessionPayload
+	err = json.Unmarshal(decoded, &payload)
+	if err != nil {
+		return "", "", err
+	}
+
+	if payload.ServerName == "" || payload.Username == "" {
+		return "", "", errors.New("invalid session payload")
+	}
+
+	return payload.ServerName, payload.Username, nil
+}
+
+func initGrid() {
+	grid = make([][]*Cell, gridHeight)
+	for i := range grid {
+		grid[i] = make([]*Cell, gridWidth)
+		for j := range grid[i] {
+			grid[i][j] = &Cell{
+				Type:    Empty, // Assign the default type for now
+				Clients: sync.Map{},
+			}
+		}
+	}
 }
 
 func help(cli *client) {
@@ -867,8 +899,6 @@ func help(cli *client) {
 
 	cli.conn.Write(jsonData)
 }
-
-
 
 // Save the map to a JSON file.
 func saveMap(grid [][]*Cell, filename string) error {
@@ -977,7 +1007,6 @@ func loadUserHandler(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusCreated)
 }
 
-
 func startAPI() {
 	http.HandleFunc("/health", healthHandler)
 	http.HandleFunc("/api/loadUser", loadUserHandler)
@@ -1039,7 +1068,6 @@ func kickUserHandler(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
 	}
 }
-
 
 func sendAnnouncementHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != "POST" {
