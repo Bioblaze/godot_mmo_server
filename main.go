@@ -20,6 +20,7 @@ import (
 
 	//"github.com/dgrijalva/jwt-go"
 	"github.com/golang-jwt/jwt"
+	"github.com/joho/godotenv"
 )
 
 const (
@@ -30,16 +31,18 @@ const (
 )
 var clients sync.Map
 var channels sync.Map
-const jwtSecret = "your_jwt_secret"
+const serverjwtSecret = "your_jwt_secret1"
 var loadedUsers = make(map[string]LoadUserRequest)
 var defaultSleepDelay = 3 * time.Second
 const mapFilename = "map.json"
 var grid [][]*Cell
 var gridHeight = 25
 var gridWidth = 25
-const rpgAuthPassword = "your_predefined_password"
+const apijwtSecret = "your_jwt_secret2"
 var gridMutex sync.RWMutex
 var serverName = "TestServer1"
+var stopChan chan struct{}
+
 
 type client struct {
 	conn     net.Conn
@@ -51,6 +54,7 @@ type client struct {
 	commandRateLimiter *rateLimiter
 	sleepDelay time.Duration
 	mutedUsernames map[string]bool
+	kicked              bool
 }
 
 type ClientInfo struct {
@@ -147,6 +151,7 @@ type priorityQueueItem struct {
 
 type priorityQueue []*priorityQueueItem
 
+
 func init() {
 	// Check if the map file exists
 	if _, err := os.Stat(mapFilename); os.IsNotExist(err) {
@@ -162,9 +167,40 @@ func init() {
 		}
 		grid = loadedGrid
 	}
+	
+	// Load the .env file
+	err := godotenv.Load()
+	if err != nil {
+		fmt.Println("Error loading .env file:", err)
+	}
+
+	// Get the SERVER_NAME variable
+	serverName := os.Getenv("SERVER_NAME")
+	if serverName == "" {
+		fmt.Println("SERVER_NAME not set, using default value")
+		serverName = "default_server"
+	}
+
+	// Get the API_SECRET variable
+	apijwtSecret := os.Getenv("API_SECRET")
+	if apijwtSecret == "" {
+		fmt.Println("API_SECRET not set, using default value")
+		apijwtSecret = "default_api_secret"
+	}
+
+	// Get the SERVER_SECRET variable
+	serverjwtSecret := os.Getenv("SERVER_SECRET")
+	if serverjwtSecret == "" {
+		fmt.Println("SERVER_SECRET not set, using default value")
+		serverjwtSecret = "default_server_secret"
+	}
+
+
 }
 
 func main() {
+    stopChan = make(chan struct{})
+
 	go startAPI()
 
 	os := runtime.GOOS
@@ -187,6 +223,9 @@ func main() {
 	if err != nil {
 		log.Fatalf("Failed to start server: %v", err)
 	}
+
+    // Wait for a stop signal
+    <-stopChan
 }
 
 func startServer() error {
@@ -198,13 +237,17 @@ func startServer() error {
 	defer ln.Close()
 
 	for {
-		conn, err := ln.Accept()
-		if err != nil {
-			fmt.Println("Error accepting connection:", err)
-			continue
+		select {
+		case <-stopChan:
+			break
+		default:
+			conn, err := ln.Accept()
+			if err != nil {
+				log.Printf("Failed to accept connection: %v\n", err)
+				continue
+			}
+			go handleConnection(conn)
 		}
-
-		go handleConnection(conn)
 	}
 }
 
@@ -275,7 +318,12 @@ func handleConnection(conn net.Conn) {
 
 	defer func() {
 		clients.Delete(cli.username)
-		announce(cli, "left the chat!")
+		if !cli.kicked {
+			announce(cli, "left the chat!")
+		} else {
+			
+			fmt.Println("User was kicked from the Server")
+		}
 	}()
 
 	for {
@@ -673,7 +721,7 @@ func generateJWT(serverName, username string) (string, error) {
 	}
 
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
-	return token.SignedString([]byte(jwtSecret))
+	return token.SignedString([]byte(serverjwtSecret))
 }
 
 func newRateLimiter(maxTokens int, fillRate time.Duration) *rateLimiter {
@@ -991,7 +1039,20 @@ func loadUserHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	rpgAuthHeader := r.Header.Get("RPG_AUTH")
-	if rpgAuthHeader != rpgAuthPassword {
+	if rpgAuthHeader == "" {
+		w.WriteHeader(http.StatusUnauthorized)
+		return
+	}
+
+	// Decode and verify the JWT
+	token, jwterr := jwt.Parse(rpgAuthHeader, func(token *jwt.Token) (interface{}, error) {
+		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
+			return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
+		}
+		return []byte(apijwtSecret), nil
+	})
+
+	if jwterr != nil || !token.Valid {
 		w.WriteHeader(http.StatusUnauthorized)
 		return
 	}
@@ -1009,6 +1070,7 @@ func loadUserHandler(w http.ResponseWriter, r *http.Request) {
 
 func startAPI() {
 	http.HandleFunc("/health", healthHandler)
+	http.HandleFunc("/healthz", healthHandler)
 	http.HandleFunc("/api/loadUser", loadUserHandler)
 	http.HandleFunc("/api/kickUser", kickUserHandler)
 	http.HandleFunc("/api/sendAnnouncement", sendAnnouncementHandler)
@@ -1024,8 +1086,8 @@ func startAPI() {
 	http.HandleFunc("/api/kickUsersInCell", kickUsersInCellHandler)
 
 
-	fmt.Println("Starting API server on :3000")
-	http.ListenAndServe(":3000", nil)
+	fmt.Println("Starting API server on :5000")
+	http.ListenAndServe(":5000", nil)
 }
 
 func kickUserHandler(w http.ResponseWriter, r *http.Request) {
@@ -1035,7 +1097,20 @@ func kickUserHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	rpgAuthHeader := r.Header.Get("RPG_AUTH")
-	if rpgAuthHeader != rpgAuthPassword {
+	if rpgAuthHeader == "" {
+		w.WriteHeader(http.StatusUnauthorized)
+		return
+	}
+
+	// Decode and verify the JWT
+	token, jwterr := jwt.Parse(rpgAuthHeader, func(token *jwt.Token) (interface{}, error) {
+		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
+			return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
+		}
+		return []byte(apijwtSecret), nil
+	})
+
+	if jwterr != nil || !token.Valid {
 		w.WriteHeader(http.StatusUnauthorized)
 		return
 	}
@@ -1055,6 +1130,13 @@ func kickUserHandler(w http.ResponseWriter, r *http.Request) {
 	clients.Range(func(_, v interface{}) bool {
 		cli := v.(*client)
 		if cli.username == req.Username {
+			cli.kicked = true
+			// Send "you have been kicked" message to the kicked user
+			sendJSON(cli.conn, map[string]string{
+				"action":  "kicked",
+				"message": "You have been kicked.",
+			})
+
 			cli.conn.Close()
 			kicked = true
 			return false
@@ -1062,12 +1144,25 @@ func kickUserHandler(w http.ResponseWriter, r *http.Request) {
 		return true
 	})
 
+	// Send an announcement to all connected clients that the user has been kicked
 	if kicked {
+		announcement := map[string]string{
+			"action":   "announcement",
+			"username": req.Username,
+			"message":  "has been kicked from the server.",
+		}
+		clients.Range(func(_, v interface{}) bool {
+			cli := v.(*client)
+			sendJSON(cli.conn, announcement)
+			return true
+		})
+
 		w.WriteHeader(http.StatusOK)
 	} else {
 		w.WriteHeader(http.StatusNotFound)
 	}
 }
+
 
 func sendAnnouncementHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != "POST" {
@@ -1076,7 +1171,20 @@ func sendAnnouncementHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	rpgAuthHeader := r.Header.Get("RPG_AUTH")
-	if rpgAuthHeader != rpgAuthPassword {
+	if rpgAuthHeader == "" {
+		w.WriteHeader(http.StatusUnauthorized)
+		return
+	}
+
+	// Decode and verify the JWT
+	token, jwterr := jwt.Parse(rpgAuthHeader, func(token *jwt.Token) (interface{}, error) {
+		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
+			return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
+		}
+		return []byte(apijwtSecret), nil
+	})
+
+	if jwterr != nil || !token.Valid {
 		w.WriteHeader(http.StatusUnauthorized)
 		return
 	}
@@ -1107,7 +1215,20 @@ func kickAllUsersHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	rpgAuthHeader := r.Header.Get("RPG_AUTH")
-	if rpgAuthHeader != rpgAuthPassword {
+	if rpgAuthHeader == "" {
+		w.WriteHeader(http.StatusUnauthorized)
+		return
+	}
+
+	// Decode and verify the JWT
+	token, err := jwt.Parse(rpgAuthHeader, func(token *jwt.Token) (interface{}, error) {
+		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
+			return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
+		}
+		return []byte(apijwtSecret), nil
+	})
+
+	if err != nil || !token.Valid {
 		w.WriteHeader(http.StatusUnauthorized)
 		return
 	}
@@ -1129,7 +1250,20 @@ func sendMessageToUserHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	rpgAuthHeader := r.Header.Get("RPG_AUTH")
-	if rpgAuthHeader != rpgAuthPassword {
+	if rpgAuthHeader == "" {
+		w.WriteHeader(http.StatusUnauthorized)
+		return
+	}
+
+	// Decode and verify the JWT
+	token, jwterr := jwt.Parse(rpgAuthHeader, func(token *jwt.Token) (interface{}, error) {
+		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
+			return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
+		}
+		return []byte(apijwtSecret), nil
+	})
+
+	if jwterr != nil || !token.Valid {
 		w.WriteHeader(http.StatusUnauthorized)
 		return
 	}
@@ -1166,7 +1300,20 @@ func moveUserHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	rpgAuthHeader := r.Header.Get("RPG_AUTH")
-	if rpgAuthHeader != rpgAuthPassword {
+	if rpgAuthHeader == "" {
+		w.WriteHeader(http.StatusUnauthorized)
+		return
+	}
+
+	// Decode and verify the JWT
+	token, jwterr := jwt.Parse(rpgAuthHeader, func(token *jwt.Token) (interface{}, error) {
+		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
+			return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
+		}
+		return []byte(apijwtSecret), nil
+	})
+
+	if jwterr != nil || !token.Valid {
 		w.WriteHeader(http.StatusUnauthorized)
 		return
 	}
@@ -1222,9 +1369,23 @@ func sendMessageToCellHandler(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
 	}
-	// Check if the RPG_AUTH header is valid
-	if r.Header.Get("RPG_AUTH") != rpgAuthPassword {
-		http.Error(w, "Invalid RPG_AUTH header", http.StatusUnauthorized)
+
+	rpgAuthHeader := r.Header.Get("RPG_AUTH")
+	if rpgAuthHeader == "" {
+		w.WriteHeader(http.StatusUnauthorized)
+		return
+	}
+
+	// Decode and verify the JWT
+	token, jwterr := jwt.Parse(rpgAuthHeader, func(token *jwt.Token) (interface{}, error) {
+		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
+			return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
+		}
+		return []byte(apijwtSecret), nil
+	})
+
+	if jwterr != nil || !token.Valid {
+		w.WriteHeader(http.StatusUnauthorized)
 		return
 	}
 
@@ -1292,7 +1453,26 @@ func unmute(cli *client, args []string) {
 }
 
 func muteUserHandler(w http.ResponseWriter, r *http.Request) {
-	if r.Header.Get("RPG_AUTH") != rpgAuthPassword {
+	if r.Method != "GET" {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+
+	rpgAuthHeader := r.Header.Get("RPG_AUTH")
+	if rpgAuthHeader == "" {
+		w.WriteHeader(http.StatusUnauthorized)
+		return
+	}
+
+	// Decode and verify the JWT
+	token, err := jwt.Parse(rpgAuthHeader, func(token *jwt.Token) (interface{}, error) {
+		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
+			return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
+		}
+		return []byte(apijwtSecret), nil
+	})
+
+	if err != nil || !token.Valid {
 		w.WriteHeader(http.StatusUnauthorized)
 		return
 	}
@@ -1326,7 +1506,26 @@ func muteUserHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func saveMapHandler(w http.ResponseWriter, r *http.Request) {
-	if r.Header.Get("RPG_AUTH") != rpgAuthPassword {
+	if r.Method != "GET" {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+
+	rpgAuthHeader := r.Header.Get("RPG_AUTH")
+	if rpgAuthHeader == "" {
+		w.WriteHeader(http.StatusUnauthorized)
+		return
+	}
+
+	// Decode and verify the JWT
+	token, jwterr := jwt.Parse(rpgAuthHeader, func(token *jwt.Token) (interface{}, error) {
+		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
+			return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
+		}
+		return []byte(apijwtSecret), nil
+	})
+
+	if jwterr != nil || !token.Valid {
 		w.WriteHeader(http.StatusUnauthorized)
 		return
 	}
@@ -1343,7 +1542,26 @@ func saveMapHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func loadMapHandler(w http.ResponseWriter, r *http.Request) {
-	if r.Header.Get("RPG_AUTH") != rpgAuthPassword {
+	if r.Method != "GET" {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+
+	rpgAuthHeader := r.Header.Get("RPG_AUTH")
+	if rpgAuthHeader == "" {
+		w.WriteHeader(http.StatusUnauthorized)
+		return
+	}
+
+	// Decode and verify the JWT
+	token, jwterr := jwt.Parse(rpgAuthHeader, func(token *jwt.Token) (interface{}, error) {
+		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
+			return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
+		}
+		return []byte(apijwtSecret), nil
+	})
+
+	if jwterr != nil || !token.Valid {
 		w.WriteHeader(http.StatusUnauthorized)
 		return
 	}
@@ -1397,7 +1615,26 @@ func loadMapHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func addCellHandler(w http.ResponseWriter, r *http.Request) {
-	if r.Header.Get("RPG_AUTH") != rpgAuthPassword {
+	if r.Method != "POST" {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+
+	rpgAuthHeader := r.Header.Get("RPG_AUTH")
+	if rpgAuthHeader == "" {
+		w.WriteHeader(http.StatusUnauthorized)
+		return
+	}
+
+	// Decode and verify the JWT
+	token, jwterr := jwt.Parse(rpgAuthHeader, func(token *jwt.Token) (interface{}, error) {
+		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
+			return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
+		}
+		return []byte(apijwtSecret), nil
+	})
+
+	if jwterr != nil || !token.Valid {
 		w.WriteHeader(http.StatusUnauthorized)
 		return
 	}
@@ -1459,7 +1696,26 @@ func findEmptyAdjacentCell(x, y int) (int, int) {
 }
 
 func deleteCellHandler(w http.ResponseWriter, r *http.Request) {
-	if r.Header.Get("RPG_AUTH") != rpgAuthPassword {
+	if r.Method != "POST" {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+
+	rpgAuthHeader := r.Header.Get("RPG_AUTH")
+	if rpgAuthHeader == "" {
+		w.WriteHeader(http.StatusUnauthorized)
+		return
+	}
+
+	// Decode and verify the JWT
+	token, jwterr := jwt.Parse(rpgAuthHeader, func(token *jwt.Token) (interface{}, error) {
+		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
+			return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
+		}
+		return []byte(apijwtSecret), nil
+	})
+
+	if jwterr != nil || !token.Valid {
 		w.WriteHeader(http.StatusUnauthorized)
 		return
 	}
@@ -1501,7 +1757,26 @@ func deleteCellHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func kickUsersInCellHandler(w http.ResponseWriter, r *http.Request) {
-	if r.Header.Get("RPG_AUTH") != rpgAuthPassword {
+	if r.Method != "POST" {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+
+	rpgAuthHeader := r.Header.Get("RPG_AUTH")
+	if rpgAuthHeader == "" {
+		w.WriteHeader(http.StatusUnauthorized)
+		return
+	}
+
+	// Decode and verify the JWT
+	token, jwterr := jwt.Parse(rpgAuthHeader, func(token *jwt.Token) (interface{}, error) {
+		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
+			return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
+		}
+		return []byte(apijwtSecret), nil
+	})
+
+	if jwterr != nil || !token.Valid {
 		w.WriteHeader(http.StatusUnauthorized)
 		return
 	}
@@ -1532,5 +1807,9 @@ func kickUsersInCellHandler(w http.ResponseWriter, r *http.Request) {
 
 	w.WriteHeader(http.StatusOK)
 	w.Write([]byte("All users in the cell have been kicked"))
+}
+
+func stopServer() {
+    close(stopChan)
 }
 
