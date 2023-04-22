@@ -43,7 +43,6 @@ var gridMutex sync.RWMutex
 var serverName = "TestServer1"
 var stopChan chan struct{}
 
-
 type client struct {
 	conn     net.Conn
 	username string
@@ -280,8 +279,6 @@ func handleConnection(conn net.Conn) {
 		return
 	}
 
-	
-
 	input = input[:len(input)-1] // Remove the newline character
 
 	// Try to decode the input as a session token
@@ -300,28 +297,27 @@ func handleConnection(conn net.Conn) {
 	}
 	clients.Store(cli.username, cli)
 	if loadedUser, ok := loadedUsers[username]; ok {
-		addToGridDirectly(cli, loadedUser.X, loadedUser.Y);
+		addToGridDirectly(cli, loadedUser.X, loadedUser.Y)
 		delete(loadedUsers, username)
 	} else {
 		fmt.Println("Not a Loaded User, adding directly to Grid")
-		addToGridDirectly(cli, 0, 0);
+		addToGridDirectly(cli, 0, 0)
 	}
-	//grid[0][0].Store(cli.username, cli) // Place the client at position (0, 0) by default
-		fmt.Println("Announcing the Map to the Client")
+
+	fmt.Println("Announcing the Map to the Client")
 	announceMap(cli)
 
 	if serverName != "" {
-		announce(cli, fmt.Sprintf("transferred from %s and joined the chat!", serverName))
+		announceEventJSON(cli, cli.username, "transferred", fmt.Sprintf("transferred from %s and joined the chat!", serverName))
 	} else {
-		announce(cli, "joined the chat!")
+		announceEventJSON(cli, cli.username, "joined", "joined the chat!")
 	}
 
 	defer func() {
 		clients.Delete(cli.username)
 		if !cli.kicked {
-			announce(cli, "left the chat!")
+			announceEventJSON(cli, cli.username, "left", "left the chat!")
 		} else {
-			
 			fmt.Println("User was kicked from the Server")
 		}
 	}()
@@ -389,8 +385,13 @@ func handleCommand(cli *client, msg string) {
 	command := args[0]
 
 	switch command {
-	case "broadcast":
-		broadcast(cli)
+	case "say":
+		if len(args) < 2 {
+			cli.conn.Write([]byte("Usage: /say [message]\n"))
+		} else {
+			message := strings.Join(args[1:], " ")
+			broadcastSay(cli, message)
+		}
 	case "msg":
 		if len(args) < 3 {
 			cli.conn.Write([]byte("Usage: /msg [username] [message]\n"))
@@ -777,6 +778,31 @@ func broadcastLocation(cli *client) {
 	})
 }
 
+func broadcastSay(cli *client, message string) {
+	response := struct {
+		Action   string `json:"action"`
+		Username string `json:"username"`
+		Message string `json:"message"`
+	}{
+		Action:   "say",
+		Username: cli.username,
+		Message: message,
+	}
+
+	jsonResponse, err := json.Marshal(response)
+	if err != nil {
+		return
+	}
+
+	clients.Range(func(_, v interface{}) bool {
+		client := v.(*client)
+		if client.username != cli.username {
+			client.conn.Write(append(jsonResponse, '\n'))
+		}
+		return true
+	})
+}
+
 func (pq priorityQueue) Len() int { return len(pq) }
 
 func (pq priorityQueue) Less(i, j int) bool {
@@ -1053,6 +1079,7 @@ func loadUserHandler(w http.ResponseWriter, r *http.Request) {
 	})
 
 	if jwterr != nil || !token.Valid {
+		fmt.Println("Invalid Token was received")
 		w.WriteHeader(http.StatusUnauthorized)
 		return
 	}
@@ -1065,7 +1092,7 @@ func loadUserHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	loadedUsers[req.Username] = req
-	w.WriteHeader(http.StatusCreated)
+	w.WriteHeader(http.StatusOK)
 }
 
 func startAPI() {
@@ -1083,7 +1110,7 @@ func startAPI() {
 	http.HandleFunc("/api/loadMap", loadMapHandler)
 	http.HandleFunc("/api/addCell", addCellHandler)
 	http.HandleFunc("/api/deleteCell", deleteCellHandler)
-	http.HandleFunc("/api/kickUsersInCell", kickUsersInCellHandler)
+	http.HandleFunc("/api/kickAllUsersInCell", kickUsersInCellHandler)
 
 
 	fmt.Println("Starting API server on :5000")
@@ -1163,7 +1190,6 @@ func kickUserHandler(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-
 func sendAnnouncementHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != "POST" {
 		w.WriteHeader(http.StatusMethodNotAllowed)
@@ -1190,7 +1216,7 @@ func sendAnnouncementHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req struct {
-		Message json.RawMessage `json:"message"`
+		Message string `json:"message"`
 	}
 	err := json.NewDecoder(r.Body).Decode(&req)
 	if err != nil {
@@ -1198,10 +1224,18 @@ func sendAnnouncementHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	announcement := struct {
+		Action  string `json:"action"`
+		Message string `json:"message"`
+	}{
+		Action:  "announcement",
+		Message: req.Message,
+	}
+
 	// Broadcast the message to all connected clients
 	clients.Range(func(_, v interface{}) bool {
 		cli := v.(*client)
-		sendJSON(cli.conn, req.Message)
+		sendJSON(cli.conn, announcement)
 		return true
 	})
 
@@ -1284,9 +1318,10 @@ func sendMessageToUserHandler(w http.ResponseWriter, r *http.Request) {
 
 	toCli := toClient.(*client)
 	sendJSON(toCli.conn, map[string]interface{}{
-		"type":       "private_message",
+		"action":       "private_message",
 		"from":       payload.FromUsername,
 		"fromServer": payload.FromServer,
+		"to": payload.ToUsername,
 		"message":    payload.Message,
 	})
 
@@ -1414,7 +1449,7 @@ func sendMessageToCellHandler(w http.ResponseWriter, r *http.Request) {
 	// Send the message to all clients in the cell
 	cell.Clients.Range(func(_, v interface{}) bool {
 		cli := v.(*client)
-		jsonMessage := map[string]string{"type": "cell_message", "message": payload.Message}
+		jsonMessage := map[string]string{"action": "cell_message", "message": payload.Message}
 		sendJSON(cli.conn, jsonMessage)
 		return true
 	})
@@ -1453,7 +1488,7 @@ func unmute(cli *client, args []string) {
 }
 
 func muteUserHandler(w http.ResponseWriter, r *http.Request) {
-	if r.Method != "GET" {
+	if r.Method != "POST" {
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
 	}
@@ -1477,8 +1512,18 @@ func muteUserHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	username := r.URL.Query().Get("username")
-	if username == "" {
+	// Parse JSON payload
+	var payload struct {
+		Username string `json:"username"`
+	}
+	decoder := json.NewDecoder(r.Body)
+	perr := decoder.Decode(&payload)
+	if perr != nil {
+		http.Error(w, "Invalid JSON payload", http.StatusBadRequest)
+		return
+	}
+
+	if payload.Username == "" {
 		w.WriteHeader(http.StatusBadRequest)
 		w.Write([]byte("Missing username parameter"))
 		return
@@ -1488,7 +1533,7 @@ func muteUserHandler(w http.ResponseWriter, r *http.Request) {
 
 	clients.Range(func(_, v interface{}) bool {
 		client := v.(*client)
-		if client.username == username {
+		if client.username == payload.Username {
 			client.muted = true
 			userFound = true
 			return false
@@ -1811,5 +1856,25 @@ func kickUsersInCellHandler(w http.ResponseWriter, r *http.Request) {
 
 func stopServer() {
     close(stopChan)
+}
+
+func announceEventJSON(cli *client, username, action, message string) {
+	announcement := struct {
+		Action  string `json:"action"`
+		Username string `json:"username"`
+		Message string `json:"message"`
+	}{
+		Action:  action,
+		Username:  username,
+		Message: message,
+	}
+
+	clients.Range(func(_, v interface{}) bool {
+		otherClient := v.(*client)
+		if otherClient != cli {
+			sendJSON(otherClient.conn, announcement)
+		}
+		return true
+	})
 }
 
