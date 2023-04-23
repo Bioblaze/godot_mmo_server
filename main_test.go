@@ -795,7 +795,7 @@ func TestMuteUserHandler(t *testing.T) {
 
 	// Give the server some time to process the kick action
 	time.Sleep(2 * time.Second)
-	
+
 		// Iterate over the clients sync.Map to find the user and disconnect them
 		clients.Range(func(_, v interface{}) bool {
 			cli := v.(*client)
@@ -811,4 +811,309 @@ func TestMuteUserHandler(t *testing.T) {
 	
 	fmt.Println("TestMuteUserHandler: PASSED")
 }
+
+func TestSaveMapHandler(t *testing.T) {
+	// Start the server in a separate goroutine
+	go func() {
+		err := startServer()
+		if err != nil {
+			t.Fatalf("Failed to start server: %v", err)
+		}
+	}()
+	go startAPI()
+
+
+	// Give the clients some time to connect
+	time.Sleep(5 * time.Second)
+
+
+	req, err := http.NewRequest("GET", "http://localhost:5000/api/saveMap", nil)
+	if err != nil {
+		t.Fatal("Failed to create message request")
+	}
+	
+	// Set the RPG_AUTH header
+	req.Header.Set("RPG_AUTH", createTestJWT())
+
+	fmt.Println("Saving Map")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal("Failed to execute message request")
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("Expected status code 200, got %d", resp.StatusCode)
+	}
+
+	// Give the server some time to process the kick action
+	time.Sleep(2 * time.Second)
+
+	// Check if the map file was saved
+	_, err = os.Stat("map.json")
+	if os.IsNotExist(err) {
+		t.Fatalf("Map file was not saved")
+	} else if err != nil {
+		t.Fatalf("Error checking map file: %v", err)
+	}
+
+	// Clean up the test map file
+	err = os.Remove("map.json")
+	if err != nil {
+		t.Fatalf("Failed to clean up test map file: %v", err)
+	}
+
+	fmt.Println("TestSaveMapHandler: PASSED")
+}
+
+func TestLoadMapHandler(t *testing.T) {
+	// Start the server in a separate goroutine
+	go func() {
+		err := startServer()
+		if err != nil {
+			t.Fatalf("Failed to start server: %v", err)
+		}
+	}()
+	go startAPI()
+
+
+	// Give the clients some time to connect
+	time.Sleep(5 * time.Second)
+
+	// Save a test map file
+	err := os.WriteFile("map.json", []byte(`[[{"Type":"Empty","Clients":{}},{"Type":"Empty","Clients":{}},{"Type":"Empty","Clients":{}}]]`), 0644)
+	if err != nil {
+		t.Fatalf("Failed to create test map file: %v", err)
+	}
+
+
+
+	req, err := http.NewRequest("GET", "http://localhost:5000/api/loadMap", nil)
+	if err != nil {
+		t.Fatal("Failed to create message request")
+	}
+	
+	// Set the RPG_AUTH header
+	req.Header.Set("RPG_AUTH", createTestJWT())
+
+	fmt.Println("Loading Map")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal("Failed to execute message request")
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("Expected status code 200, got %d", resp.StatusCode)
+	}
+
+	// Give the server some time to process the kick action
+	time.Sleep(2 * time.Second)
+
+	// Clean up the test map file
+	err = os.Remove("map.json")
+	if err != nil {
+		t.Fatalf("Failed to clean up test map file: %v", err)
+	}
+
+	fmt.Println("TestLoadMapHandler: PASSED")
+}
+
+func TestAddCellHandler(t *testing.T) {
+	// Start the server in a separate goroutine
+	go func() {
+		err := startServer()
+		if err != nil {
+			t.Fatalf("Failed to start server: %v", err)
+		}
+	}()
+	go startAPI()
+
+	// Give the clients some time to connect
+	time.Sleep(5 * time.Second)
+
+	// Prepare the request payload
+	payload := struct {
+		X int `json:"x"`
+		Y int `json:"y"`
+	}{
+		X: 250,
+		Y: 250,
+	}
+
+	payloadBytes, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("Failed to marshal payload: %v", err)
+	}
+
+
+	req, err := http.NewRequest("POST", "http://localhost:5000/api/addCell", bytes.NewBuffer(payloadBytes))
+	if err != nil {
+		t.Fatal("Failed to create message request")
+	}
+	
+	// Set the RPG_AUTH header
+	req.Header.Set("RPG_AUTH", createTestJWT())
+
+	fmt.Println("Adding Cell")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal("Failed to execute message request")
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("Expected status code 200, got %d", resp.StatusCode)
+	}
+
+	// Give the server some time to process the kick action
+	time.Sleep(2 * time.Second)
+
+	// Verify that the cell was added
+	ok := grid[250][250]
+	if ok == nil {
+		t.Fatalf("Cell was not added at position (250, 250)")
+	}
+	
+	fmt.Println("TestAddCellHandler: PASSED")
+}
+
+func TestDeleteCellHandler(t *testing.T) {
+	// Start the server in a separate goroutine
+	go func() {
+		err := startServer()
+		if err != nil {
+			t.Fatalf("Failed to start server: %v", err)
+		}
+	}()
+	go startAPI()
+
+	// Give the clients some time to connect
+	time.Sleep(5 * time.Second)
+
+	// Prepare the request payload
+	payload := struct {
+		X int `json:"x"`
+		Y int `json:"y"`
+	}{
+		X: 5,
+		Y: 5,
+	}
+
+	payloadBytes, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("Failed to marshal payload: %v", err)
+	}
+
+
+	req, err := http.NewRequest("POST", "http://localhost:5000/api/deleteCell", bytes.NewBuffer(payloadBytes))
+	if err != nil {
+		t.Fatal("Failed to create message request")
+	}
+	
+	// Set the RPG_AUTH header
+	req.Header.Set("RPG_AUTH", createTestJWT())
+
+	fmt.Println("Adding Cell")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal("Failed to execute message request")
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("Expected status code 200, got %d", resp.StatusCode)
+	}
+
+	// Give the server some time to process the kick action
+	time.Sleep(2 * time.Second)
+
+	// Verify that the cell has been deleted from the grid
+	gridMutex.Lock()
+	defer gridMutex.Unlock()
+	if len(grid[0]) != gridWidth {
+		t.Fatalf("The cell was not deleted from the grid")
+	}
+
+	fmt.Println("TestDeleteCellHandler: PASSED")
+}
+
+func TestKickUsersInCellHandler(t *testing.T) {
+	// Start the server in a separate goroutine
+	go func() {
+		err := startServer()
+		if err != nil {
+			t.Fatalf("Failed to start server: %v", err)
+		}
+	}()
+	go startAPI()
+
+    // Connect two clients
+    conn1 := connectClient(t)
+    defer conn1.Close()
+    conn2 := connectClient(t)
+    defer conn2.Close()
+
+
+	loginTest(t, conn1, "testUser1")
+
+	loginTest(t, conn2, "testUser2")
+
+	
+	checkUserJoinedReceived(t, conn1, "testUser2", "joined the chat!")
+
+
+	// Give the clients some time to connect
+	time.Sleep(5 * time.Second)
+
+	// Prepare the request payload
+	payload := struct {
+		X int `json:"x"`
+		Y int `json:"y"`
+	}{
+		X: 0,
+		Y: 0,
+	}
+
+	payloadBytes, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("Failed to marshal payload: %v", err)
+	}
+
+
+	req, err := http.NewRequest("POST", "http://localhost:5000/api/kickAllUsersInCell", bytes.NewBuffer(payloadBytes))
+	if err != nil {
+		t.Fatal("Failed to create message request")
+	}
+	
+	// Set the RPG_AUTH header
+	req.Header.Set("RPG_AUTH", createTestJWT())
+
+	fmt.Println("Adding Cell")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal("Failed to execute message request")
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("Expected status code 200, got %d", resp.StatusCode)
+	}
+
+	// Give the server some time to process the kick action
+	time.Sleep(2 * time.Second)
+
+	// Check if the clients are disconnected
+	if _, ok := clients.Load("testUser1"); ok {
+		t.Fatalf("Client 1 (%s) was not kicked from the server", "testUser1")
+	}
+
+	if _, ok := clients.Load("testUser2"); ok {
+		t.Fatalf("Client 2 (%s) was not kicked from the server", "testUser2")
+	}
+	
+	fmt.Println("TestDeleteCellHandler: PASSED")
+}
+
+
 

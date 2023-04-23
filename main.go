@@ -91,6 +91,8 @@ type Cell struct {
 type CellInfo struct {
 	Type    CellType     `json:"type"`
 	Clients []ClientInfo `json:"clients"`
+	X		int			 `json:"x"`
+	Y		int			 `json:"y"`
 }
 
 type deleteCellRequest struct {
