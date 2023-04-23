@@ -13,7 +13,6 @@ import (
 	"net/http"
 	"os"
 	"runtime"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -394,6 +393,7 @@ func handleCommand(cli *client, msg string) {
 			message := strings.Join(args[1:], " ")
 			broadcastSay(cli, message)
 		}
+		/*
 	case "msg":
 		if len(args) < 3 {
 			cli.conn.Write([]byte("Usage: /msg [username] [message]\n"))
@@ -439,6 +439,7 @@ func handleCommand(cli *client, msg string) {
 			title := strings.Join(args[1:], " ")
 			setChannelTitle(cli, title)
 		}
+		*/
 	case "north":
 		moveClient(cli, 0, -1)
 	case "east":
@@ -447,6 +448,7 @@ func handleCommand(cli *client, msg string) {
 		moveClient(cli, 0, 1)
 	case "west":
 		moveClient(cli, -1, 0)
+		/*
 	case "travel":
 		jwt, err := generateJWT(serverName, cli.username)
 		if err != nil {
@@ -455,6 +457,7 @@ func handleCommand(cli *client, msg string) {
 		}
 		response := fmt.Sprintf("Travel token: %s\n", jwt)
 		cli.conn.Write([]byte(response))
+		
 	case "whisper":
 		if len(args) < 3 {
 			cli.conn.Write([]byte("Usage: /whisper [username] [message]\n"))
@@ -475,6 +478,7 @@ func handleCommand(cli *client, msg string) {
 				moveTo(cli, x, y, cli.sleepDelay)
 			}
 		}
+		*/
 	case "help":
 		help(cli)
 	default:

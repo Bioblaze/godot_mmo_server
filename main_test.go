@@ -1115,5 +1115,60 @@ func TestKickUsersInCellHandler(t *testing.T) {
 	fmt.Println("TestDeleteCellHandler: PASSED")
 }
 
+func TestBroadcastSay(t *testing.T) {
+	// Start the server in a separate goroutine
+	go func() {
+		err := startServer()
+		if err != nil {
+			t.Fatalf("Failed to start server: %v", err)
+		}
+	}()
+	go startAPI()
+
+    // Connect two clients
+    conn1 := connectClient(t)
+    defer conn1.Close()
+    conn2 := connectClient(t)
+    defer conn2.Close()
+
+
+	loginTest(t, conn1, "testUser1")
+
+	loginTest(t, conn2, "testUser2")
+
+	
+	checkUserJoinedReceived(t, conn1, "testUser2", "joined the chat!")
+
+	// Give the clients some time to connect
+	time.Sleep(5 * time.Second)
+
+	// Send a message using the `/say` command from client1 to client2
+	message := "hello"
+	fmt.Fprintf(conn1, fmt.Sprintf("/say %s\n", message))
+
+	// Read the response from client2
+	responseString, err := bufio.NewReader(conn2).ReadString('\n')
+	if err != nil {
+		t.Fatalf("Failed to read server response: %v", err)
+	}
+	fmt.Println(responseString)
+	// Unmarshal the response into a struct
+	var response struct {
+		Action   string `json:"action"`
+		Username string `json:"username"`
+		Message  string `json:"message"`
+	}
+	err = json.Unmarshal([]byte(responseString), &response)
+	if err != nil {
+		t.Fatalf("Error unmarshalling response: %v", err)
+	}
+
+	// Check if the response has the correct fields
+	if response.Action != "say" || response.Username != "testUser1" || response.Message != message {
+		t.Fatalf("Unexpected response: %v", response)
+	}
+
+	fmt.Println("TestBroadcastSay: PASSED")
+}
 
 
