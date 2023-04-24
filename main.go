@@ -233,7 +233,7 @@ func startServer() error {
 	if err != nil {
 		return fmt.Errorf("failed to listen: %v", err)
 	}
-	fmt.Println("Startup Complete~")
+	fmt.Println("Starting MMO server on :6000")
 	defer ln.Close()
 
 	for {
@@ -281,6 +281,8 @@ func handleConnection(conn net.Conn) {
 	}
 
 	input = input[:len(input)-1] // Remove the newline character
+
+	fmt.Println(input)
 
 	// Try to decode the input as a session token
 	serverName, username, err := decodeSessionToken(input)
@@ -709,7 +711,15 @@ func announceMap(cli *client) {
 		}
 	}
 
-	jsonData, err := json.Marshal(gridInfo)
+	payload := struct {
+		Action       string    `json:"action"`
+		Map [][]CellInfo `json:"map"`
+	}{
+		Action:       "map",
+		Map: gridInfo,
+	}
+
+	jsonData, err := json.Marshal(payload)
 	if err != nil {
 		fmt.Println("Error marshaling grid data:", err)
 		return
